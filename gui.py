@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+
 # redirect stdout and stderr because Windows is dumb
 if sys.stdout is None or sys.stderr is None:
     sys.stdout = open(os.devnull, 'w')
@@ -8,6 +10,29 @@ if sys.stdout is None or sys.stderr is None:
 import PySimpleGUI as sg
 import json
 from main import optimize_production
+
+def node_color(id):
+    colors_exprs = [
+        ["itm_ai_expansion_server_out", "chartreuse"],
+        ["itm_ballistic_warp_drive_out", "chartreuse"],
+        ["itm_biochemical_sculptor_out", "chartreuse"],
+        ["itm_nuclear_pasta_out", "chartreuse"],
+        ["res_water", "lightblue"],
+        ["itm_.*_out", "darkorchid"],
+        ["res_.*", "lightgrey"]
+    ]
+    for expr, color in colors_exprs:
+        if re.match(expr, id):
+            return color
+    return "darkorange"
+
+def snake_case(s):
+    # Replace hyphens with spaces, then apply regular expression substitutions for title case conversion
+    # and add an underscore between words, finally convert the result to lowercase
+    return '_'.join(
+        re.sub('([A-Z][a-z]+)', r' \1',
+        re.sub('([A-Z]+)', r' \1',
+        s.replace('-', ' ').replace(':', '').replace('(', '').replace(')', ''))).split()).lower()
 
 # Check if GLPK_PATH environment variable is set
 glpk_path = os.getenv('GLPK_PATH')
@@ -205,6 +230,17 @@ ingredients_layout = [
     [sg.Multiline(size=(80, 20), key='ingredients_output')]
 ]
 
+# Layout for Item Graph
+graph_item_layout = [
+    [sg.Text('Item Graph', font=('Helvetica', 16), text_color=sg.LOOK_AND_FEEL_TABLE['Modern']['ACCENT1'])],
+    [sg.Multiline(size=(80, 20), key='graph_item_output')]
+]
+# Layout for ingredients
+graph_recipie_layout = [
+    [sg.Text('Recipies Graph', font=('Helvetica', 16), text_color=sg.LOOK_AND_FEEL_TABLE['Modern']['ACCENT1'])],
+    [sg.Multiline(size=(80, 20), key='graph_item_output')]
+]
+
 # Main layout with Tabs
 layout = [
     [sg.TabGroup([
@@ -215,7 +251,9 @@ layout = [
          sg.Tab('Outputs', output_layout),
          sg.Tab('Results', results_layout),
          sg.Tab('Products', products_layout),
-         sg.Tab('Ingredients', ingredients_layout)]
+         sg.Tab('Ingredients', ingredients_layout),
+         sg.Tab('Graph Items', graph_item_layout),
+         sg.Tab('Graph Recipies', graph_recipie_layout)]
     ])]
 ]
 
@@ -373,7 +411,7 @@ while True:
                 else:
                     window[f'output_checkbox_{0}'].update(False)
 
-                sg.popup(f"Settings loaded from {load_filename}")
+                sg.popup_auto_close(f"Settings loaded from {load_filename}", auto_close_duration=0.5)
             else:
                 sg.popup_error(f"Failed to load settings from {load_filename}")
 
@@ -483,7 +521,52 @@ while True:
                     results_output.append(f"\n<- {round(num, 2)}  {ingredient}")
             window['ingredients_output'].update(''.join(results_output))
 
+            #Graph Item Tab
+            graph_nodes = {}
+            graph_edges = {}
+            for resource, amount in sorted(results.get('resources_needed', {}).items()):
+                node_id = f"res_{snake_case(resource)}"
+                graph_nodes[node_id] = {"name": resource, "type": "resource", "amount": round(amount, 2), "code": f"{node_id}[fillcolor={node_color(node_id)},label=<<b>{resource}</b><br/>{round(amount, 2)}/min>];" }
+            for item, amount in sorted(results.get('items_needed', {}).items()):
+                node_id = snake_case(item)
+                out = results.get('items_output', {})
+                if item in out:
+                    amount_out = round(out[item], 2)
+                    itm_out_node_id = f"itm_{node_id}_out"
+                    graph_nodes[itm_out_node_id] = {"name": f"{item} Out", "type": "item", "amount": amount_out, "code": f"{itm_out_node_id}[fillcolor={node_color(itm_out_node_id)},label=<<b>{item}</b><br/>{round(amount_out, 2)}/min>];" }
+                    amount = amount - amount_out
+                if  amount > 0.01:
+                    itm_node_id = f"itm_{node_id}"
+                    graph_nodes[itm_node_id] = {"name": item, "type": "item", "amount": round(amount, 2), "code": f"{itm_node_id}[fillcolor={node_color(itm_node_id)},label=<<b>{item}</b><br/>{round(amount, 2)}/min>];" }
+
+            for recipe_name, num in results['recipes_used'].items():
+                for recipe_code, recipe in data["recipes"].items():
+                    if recipe['name'] == recipe_name:
+                        bld_node_id = f"bld_{snake_case(recipe_name)}"
+                        amount=round(num, 2)
+                        graph_nodes[bld_node_id] = {"name": recipe_name, "type": "building", "amount": amount, "code": f"{bld_node_id}[fillcolor={node_color(bld_node_id)},label=<<b>{recipe_name}</b><br/>{amount}x {data['machines'][recipe['machine']]['name']}>];" }
+            # products_map = {
+            #     data['items'][item]['name'] if item in data['items'] else data['resources'][item]['name']: {
+            #         data['recipes'][recipe]['name']: (60 / data['recipes'][recipe]['time']) * ingredient[
+            #             'amount'] * recipe_val.value
+            #         for recipe, recipe_val in m.r.items()
+            #         if recipe_val.value is not None and recipe_val.value > 0.001
+            #         for ingredient in data['recipes'][recipe]['ingredients']
+            #         if item == ingredient['item']}
+            #     for item, item_val in m.i.items()
+            #     if item_val.value is not None and item_val.value > 0.001}
+
+            # for recipe, num in sorted(results['recipes_used'].items()):
+            #     graph_nodes[f"{snake_case(recipe.replace(':', ''))}"] = { "recipe": recipe, "label": f"{recipe}\\n{round(num,2)}x\"]\n"}
+            graph_output = "digraph {\n"
+            graph_output += "  rankdir=LR;\n"
+            graph_output += "  node[style=filled,shape=rectangle];\n"
+            graph_output += '\n'.join(f"  {node["code"]}" for resource, node in graph_nodes.items())
+            graph_output += "\n}\n"
+            window['graph_item_output'].update(graph_output)
+
         except Exception as e:
             sg.popup_error(f"Error running optimization: {e}")
 
 window.close()
+
